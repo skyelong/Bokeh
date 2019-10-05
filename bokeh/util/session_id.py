@@ -29,6 +29,7 @@ import base64
 import codecs
 import hashlib
 import hmac
+import json
 import time
 
 # External imports
@@ -52,62 +53,88 @@ __all__ = (
 # General API
 #-----------------------------------------------------------------------------
 
+# NOTE: Until Bokeh 2.0 the function names in here are somewhat mis-named.
+# The function generate_session_id, for instance, now generates something more
+# like a JWT token with a session_id field in the payload. When Bokeh 2.0 is
+# released, these functions can all be renamed and re-arranged.
+
 def generate_secret_key():
-    """
-    Generate a new securely-generated secret key appropriate
-    for SHA-256 HMAC signatures. This key could be used to
-    sign Bokeh server session IDs for example.
-    """
+    ''' Generate a new securely-generated secret key appropriate for SHA-256
+    HMAC signatures.
+
+    This key could be used to sign Bokeh server session IDs, for example.
+    '''
     return _get_random_string()
 
-def generate_session_id(secret_key=settings.secret_key_bytes(), signed=settings.sign_sessions()):
-    """Generate a random session ID.
+def generate_session_id(secret_key=settings.secret_key_bytes(),
+                        signed=settings.sign_sessions(),
+                        extra_payload=None):
+    ''' Generate a random session ID.
 
-    Typically, each browser tab connected to a Bokeh application
-    has its own session ID.  In production deployments of a Bokeh
-    app, session IDs should be random and unguessable - otherwise
-    users of the app could interfere with one another.
+    Typically, each browser tab connected to a Bokeh application has its own
+    session ID.  In production deployments of a Bokeh app, session IDs should be
+    random and unguessable - otherwise users of the app could interfere with one
+    another.
 
-    If session IDs are signed with a secret key, the server can
-    verify that the generator of the session ID was "authorized"
-    (the generator had to know the secret key). This can be used
-    to have a separate process, such as another web application,
-    which generates new sessions on a Bokeh server. This other
-    process may require users to log in before redirecting them to
-    the Bokeh server with a valid session ID, for example.
+    If session IDs are signed with a secret key, the server can verify that the
+    generator of the session ID was "authorized" (the generator had to know the
+    secret key). This can be used to have a separate process, such as another
+    web application which generates new sessions on a Bokeh server. This other
+    process may require users to log in before redirecting them to the Bokeh
+    server with a valid session ID, for example.
 
     Args:
-        secret_key (str, optional) : Secret key (default: value of 'BOKEH_SECRET_KEY' env var)
-        signed (bool, optional) : Whether to sign the session ID (default: value of
-                                  'BOKEH_SIGN_SESSIONS' env var)
+        secret_key (str, optional) :
+            Secret key (default: value of BOKEH_SECRET_KEY environment varariable)
 
-    """
+        signed (bool, optional) :
+            Whether to sign the session ID (default: value of BOKEH_SIGN_SESSIONS
+            envronment varariable)
+
+        extra_payload(dict, optional) :
+            Extra key/value pairs to include in the Bokeh session token
+
+    Returns:
+        str
+
+    '''
     secret_key = _ensure_bytes(secret_key)
+    payload = {'session_id': _get_random_string(secret_key=secret_key)}
+    if extra_payload:
+        if "session_id" in extra_payload:
+            raise RuntimeError("extra_payload for session tokens may not contain 'session_id'")
+        payload.update(extra_payload)
+    token = _base64_encode(json.dumps(payload))
     if signed:
-        # note: '-' can also be in the base64 encoded signature
-        base_id = _get_random_string(secret_key=secret_key)
-        return base_id + '-' + _signature(base_id, secret_key)
-    else:
-        return _get_random_string(secret_key=secret_key)
+        token += ('.' + _signature(token, secret_key))
+    return token
 
 def check_session_id_signature(session_id, secret_key=settings.secret_key_bytes(),
                                signed=settings.sign_sessions()):
-    """Check the signature of a session ID, returning True if it's valid.
+    ''' Check the signature of a session ID, returning True if it's valid.
 
-    The server uses this function to check whether a session ID
-    was generated with the correct secret key. If signed sessions are disabled,
-    this function always returns True.
+    The server uses this function to check whether a session ID was generated
+    with the correct secret key. If signed sessions are disabled, this function
+    always returns True.
 
     Args:
-        session_id (str) : The session ID to check
-        secret_key (str, optional) : Secret key (default: value of 'BOKEH_SECRET_KEY' env var)
-        signed (bool, optional) : Whether to check anything (default: value of
-                                  'BOKEH_SIGN_SESSIONS' env var)
+        session_id (str) :
+            The session ID to check
 
-    """
+        secret_key (str, optional) :
+            Secret key (default: value of BOKEH_SECRET_KEY environment variable)
+
+        signed (bool, optional) :
+            Whether to check anything (default: value of BOKEH_SIGN_SESSIONS
+            environment variable)
+
+    Returns:
+        bool
+
+    '''
     secret_key = _ensure_bytes(secret_key)
     if signed:
-        pieces = session_id.split('-', 1)
+        pieces = session_id.split('.', 1)
         if len(pieces) != 2:
             return False
         base_id = pieces[0]
@@ -140,12 +167,11 @@ def _get_sysrandom():
     except NotImplementedError:
         import warnings
         warnings.warn('A secure pseudo-random number generator is not available '
-                    'on your system. Falling back to Mersenne Twister.')
+                      'on your system. Falling back to Mersenne Twister.')
         if settings.secret_key() is None:
             warnings.warn('A secure pseudo-random number generator is not available '
-                        'and no BOKEH_SECRET_KEY has been set. '
-                        'Setting a secret key will mitigate the lack of a secure '
-                        'generator.')
+                          'and no BOKEH_SECRET_KEY has been set. Setting a secret '
+                          'key will mitigate the lack of a secure generator.')
         using_sysrandom = False
     return random, using_sysrandom
 
@@ -166,7 +192,7 @@ def _reseed_if_needed(using_sysrandom, secret_key):
         # using a value that is hard for an attacker to predict, every
         # time a random string is required. This may change the
         # properties of the chosen random sequence slightly, but this
-        # is better than absolute predictability.
+        # is better than absolute predictability.d
         random.seed(
             hashlib.sha256(
                 ("%s%s%s" % (
@@ -183,6 +209,19 @@ def _base64_encode(decoded):
     # remove padding '=' chars that cause trouble
     return str(encoded.rstrip('='))
 
+def _base64_decode(encoded, encoding=None):
+    # put the padding back
+    mod = len(encoded) % 4
+    if mod != 0:
+        encoded = encoded + ("=" * (4 - mod))
+    assert (len(encoded) % 4) == 0
+    # base64 lib both takes and returns bytes, we want to work with strings
+    encoded_as_bytes = codecs.encode(encoded, 'ascii')
+    result = base64.urlsafe_b64decode(encoded_as_bytes)
+    if encoding:
+        result = codecs.decode(result, 'utf-8')
+    return result
+
 def _signature(base_id, secret_key):
     secret_key = _ensure_bytes(secret_key)
     base_id = codecs.encode(base_id, "utf-8")
@@ -190,15 +229,15 @@ def _signature(base_id, secret_key):
     return _base64_encode(signer.digest())
 
 def _get_random_string(length=44,
-                       allowed_chars='abcdefghijklmnopqrstuvwxyz'
-                       'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+                       allowed_chars='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
                        secret_key=settings.secret_key_bytes()):
-    """
-    Return a securely generated random string.
-    With the a-z, A-Z, 0-9 character set:
-    Length 12 is a 71-bit value. log_2((26+26+10)^12) =~ 71
-    Length 44 is a 261-bit value. log_2((26+26+10)^44) = 261
-    """
+    ''' Return a securely generated random string.
+
+    With the default a-z, A-Z, 0-9 character set:
+    * Length 12 is a 71-bit value. log_2((26+26+10)^12) =~ 71
+    * Length 44 is a 261-bit value. log_2((26+26+10)^44) = 261
+
+    '''
     secret_key = _ensure_bytes(secret_key)
     _reseed_if_needed(using_sysrandom, secret_key)
     return ''.join(random.choice(allowed_chars) for i in range(length))
